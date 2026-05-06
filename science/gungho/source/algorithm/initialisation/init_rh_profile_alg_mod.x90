@@ -1,0 +1,121 @@
+!-----------------------------------------------------------------------------
+! (c) Crown copyright 2026 Met Office. All rights reserved.
+! The file LICENCE, distributed with this code, contains details of the terms
+! under which the code may be used.
+!-----------------------------------------------------------------------------
+!> @brief   Initialise water vapour from a specified relative humidity profile.
+!> @details Reads a user-supplied profile of relative humidity (expressed as a
+!!          fraction where 0 = completely dry and 1 = saturated), interpolates
+!!          it onto model levels, then converts to water vapour mixing ratio
+!!          using the current potential temperature and Exner pressure fields.
+!!
+!!          This routine is designed to be called after an initial (typically
+!!          dry) Exner pressure has been established, i.e. it requires
+!!          consistent theta and exner fields as input.  The conversion is
+!!          first-order accurate: the mixing ratio is computed from the
+!!          supplied Exner pressure, which is typically the dry value.  The
+!!          caller is responsible for recomputing Exner and rho self-consistently
+!!          with the resulting mixing ratio.
+!!
+!!          The profile interpolation reuses profile_interp_kernel_type,
+!!          following the same module-variable data-passing pattern used in
+!!          init_thermo_profile_alg_mod.  The conversion uses rh_to_mr_kernel_mod,
+!!          whose formula is the algebraic inverse of relative_humidity_kernel_mod.
+
+module init_rh_profile_alg_mod
+
+  use constants_mod,               only: r_def, i_def, l_def, rmdi
+  use field_mod,                   only: field_type
+  use fs_continuity_mod,           only: Wtheta
+  use log_mod,                     only: log_event, LOG_LEVEL_INFO
+  use physics_mappings_alg_mod,    only: map_physics_scalars
+  use planet_config_mod,           only: p_zero, kappa, recip_epsilon
+  use sci_geometric_constants_mod, only: get_height_fe, get_height_fv
+
+  implicit none
+
+  private
+
+  public :: init_rh_profile_alg
+
+contains
+
+  !> @brief   Initialise water vapour from a specified relative humidity profile.
+  !> @param[in,out] mr_v    Water vapour mixing ratio field to be initialised
+  !> @param[in]     exner   Exner pressure field (W3, typically the dry first-guess)
+  !> @param[in]     theta   Potential temperature field (Wtheta)
+  subroutine init_rh_profile_alg( mr_v, exner, theta )
+
+    use initial_vapour_config_mod, only: rh_prof_size    => profile_size,    &
+                                         rh_prof_data    => profile_data,    &
+                                         rh_prof_heights => profile_heights
+
+    !> @todo Data passed to kernels via module 'use' statements.
+    !>       When PSyclone supports passing of arrays into kernels (issue #1312),
+    !>       these data should be passed through the argument list of the invoke.
+    use profile_interp_kernel_mod, only: profile_interp_kernel_type, &
+                                         profile_size,               &
+                                         profile_data,               &
+                                         profile_heights
+
+    use rh_to_mr_kernel_mod,       only: rh_to_mr_kernel_type
+
+    implicit none
+
+    ! Arguments
+    type(field_type), intent(inout) :: mr_v
+    type(field_type), intent(in)    :: exner
+    type(field_type), intent(in)    :: theta
+
+    ! Local fields
+    type(field_type)          :: rel_hum_field  ! RH interpolated to model levels
+    type(field_type)          :: exner_at_wt    ! Exner pressure mapped to Wtheta
+
+    ! Pointer to height coordinate on Wtheta levels
+    type(field_type), pointer :: height_wth => null()
+
+    logical(kind=l_def) :: profile_extrap
+    integer(kind=i_def) :: mesh_id
+
+    call log_event( "Gungho: Initialising vapour from relative humidity profile",&
+                    LOG_LEVEL_INFO )
+
+    mesh_id = theta%get_mesh_id()
+
+    if ( theta%get_element_order_h() > 0 .or. theta%get_element_order_v() > 0 ) then
+      height_wth => get_height_fe(Wtheta, mesh_id)
+    else
+      height_wth => get_height_fv(Wtheta, mesh_id)
+    end if
+
+    ! Initialise temporary fields on the Wtheta function space
+    call rel_hum_field%initialise( vector_space = theta%get_function_space() )
+    call exner_at_wt%initialise(   vector_space = theta%get_function_space() )
+
+    ! --- Step 1: interpolate the relative humidity profile to model levels ----
+    ! Load RH data into profile_interp_kernel module variables, following the
+    ! same pattern as init_thermo_profile_alg_mod.
+    profile_extrap = .true.
+    profile_size    = rh_prof_size
+    profile_data(1:profile_size)    = rh_prof_data(1:profile_size)
+    profile_heights(1:profile_size) = rh_prof_heights(1:profile_size)
+
+    call invoke( setval_c( rel_hum_field, rmdi ),                       &
+                 profile_interp_kernel_type( rel_hum_field, height_wth, &
+                                             profile_extrap ) )
+
+    ! --- Step 2: map Exner pressure from W3 to Wtheta points -----------------
+    call map_physics_scalars( exner_at_wt, exner )
+
+    ! --- Step 3: convert relative humidity fraction to mixing ratio -----------
+    ! Uses the inverse of the relative_humidity_kernel_mod formula.
+    ! Relative humidity is a fraction: 0 = completely dry, 1 = saturated.
+    call invoke( rh_to_mr_kernel_type( mr_v, rel_hum_field, theta,    &
+                                       exner_at_wt,                   &
+                                       p_zero, kappa, recip_epsilon ) )
+
+    nullify( height_wth )
+
+  end subroutine init_rh_profile_alg
+
+end module init_rh_profile_alg_mod

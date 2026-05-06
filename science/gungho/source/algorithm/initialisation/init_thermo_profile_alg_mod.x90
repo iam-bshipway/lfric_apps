@@ -38,9 +38,12 @@ use initial_temperature_config_mod, only: temp_prof_size    => profile_size,    
                                           perturb,                              &
                                           perturb_random
 
-use initial_vapour_config_mod,      only: vapour_prof_size    => profile_size,   &
-                                          vapour_prof_data    => profile_data,   &
-                                          vapour_prof_heights => profile_heights
+use initial_vapour_config_mod,      only: vapour_prof_size    => profile_size,        &
+                                          vapour_prof_data    => profile_data,        &
+                                          vapour_prof_heights => profile_heights,     &
+                                          vapour_profile_type,                        &
+                                          vapour_profile_type_mixing_ratio,           &
+                                          vapour_profile_type_relative_humidity
 
 !> @todo Data passed to the kernel via module 'use' statements.
 !>       When PSyclone supports passing of arrays into kernels (issue #1312),
@@ -87,7 +90,12 @@ else
                                            profile_extrap ) )
 end if
 
-if ( moisture_formulation /= moisture_formulation_dry ) then
+! Initialise mr_v from the mixing ratio profile only.
+! When vapour_profile_type='relative_humidity', mr_v is left at zero here;
+! the driver will call init_rh_profile_alg after Exner is established to
+! perform the conversion and restore hydrostatic balance with moisture.
+if ( moisture_formulation /= moisture_formulation_dry .and. &
+     vapour_profile_type == vapour_profile_type_mixing_ratio ) then
   profile_size    = vapour_prof_size
   profile_data(1:profile_size)    = vapour_prof_data(1:profile_size)
   profile_heights(1:profile_size) = vapour_prof_heights(1:profile_size)

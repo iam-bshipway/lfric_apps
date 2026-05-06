@@ -1,0 +1,149 @@
+!-----------------------------------------------------------------------------
+! (c) Crown copyright 2026 Met Office. All rights reserved.
+! The file LICENCE, distributed with this code, contains details of the terms
+! under which the code may be used.
+!-----------------------------------------------------------------------------
+!> @brief Unit tests for rh_to_mr_kernel_mod.
+!>
+!> @details Tests the rh_to_mr_code subroutine against analytically derived
+!!          reference values, verifying:
+!!
+!!            1. RH = 0 (completely dry) gives mr_v = 0.
+!!            2. RH = 1 (saturated) gives mr_v = q_sat (the saturation
+!!               mixing ratio computed from the same temperature and pressure).
+!!            3. RH = 0.5 gives the value expected from the inversion formula:
+!!                  mr_v = 0.5 * q_sat / (1 + 0.5 * q_sat * recip_epsilon)
+!!
+!!          In all cases the test uses surface-like conditions:
+!!            theta = 297 K, exner = 1.0 (so T = 297 K, p = p_zero).
+!!
+!!          The Tetens saturation formula (physics_common_mod::qsaturation) is
+!!          used to compute the reference q_sat directly, ensuring the test is
+!!          self-consistent with the kernel implementation.
+!!
+!!          Relative humidity is defined as a fraction: 0 = completely dry,
+!!          1 = saturated.  This is consistent with relative_humidity_kernel_mod.
+
+module rh_to_mr_kernel_mod_test
+
+  use constants_mod,      only: r_def, i_def
+  use physics_common_mod, only: qsaturation
+  use rh_to_mr_kernel_mod, only: rh_to_mr_code
+
+  use, intrinsic :: iso_fortran_env, only: real64
+  use funit
+
+  implicit none
+
+  private
+  public :: rh_to_mr_test_type, test_all
+
+  @TestCase
+  type, extends(TestCase) :: rh_to_mr_test_type
+    private
+  contains
+    procedure setUp
+    procedure tearDown
+    procedure test_dry
+    procedure test_saturated
+    procedure test_half_rh
+  end type rh_to_mr_test_type
+
+  ! Surface-like conditions: theta = 297 K, Exner = 1.0 (T = 297 K, p = p_zero)
+  real(r_def), parameter :: theta_val      = 297.0_r_def   ! K
+  real(r_def), parameter :: exner_val      = 1.0_r_def     ! dimensionless
+  real(r_def), parameter :: p_zero_val     = 100000.0_r_def ! Pa (1000 hPa)
+  real(r_def), parameter :: kappa_val      = 0.28571_r_def  ! Rd/cp
+  real(r_def), parameter :: recip_eps_val  = 1.60771_r_def  ! Rv/Rd = 1/epsilon
+
+  ! Pressure in mbar for qsaturation (p_zero = 100000 Pa = 1000 mbar)
+  real(r_def), parameter :: p_mbar = 1000.0_r_def
+
+  real(r_def), parameter :: tol = 1.0e-10_r_def
+
+contains
+
+  subroutine setUp( this )
+    implicit none
+    class(rh_to_mr_test_type), intent(inout) :: this
+  end subroutine setUp
+
+  subroutine tearDown( this )
+    implicit none
+    class(rh_to_mr_test_type), intent(inout) :: this
+  end subroutine tearDown
+
+  !> @brief RH = 0 (completely dry): mixing ratio must be exactly zero.
+  @Test
+  subroutine test_dry( this )
+    implicit none
+    class(rh_to_mr_test_type), intent(inout) :: this
+
+    real(r_def) :: mr_v
+    real(r_def) :: rel_hum
+
+    rel_hum = 0.0_r_def
+    mr_v    = 999.0_r_def  ! arbitrary non-zero starting value
+
+    call rh_to_mr_code( mr_v, rel_hum, theta_val, exner_val, &
+                        p_zero_val, kappa_val, recip_eps_val )
+
+    @assertEqual( 0.0_r_def, mr_v, tol, &
+                  'RH=0 should give mr_v=0' )
+  end subroutine test_dry
+
+  !> @brief RH = 1 (saturated): mixing ratio must equal q_sat.
+  @Test
+  subroutine test_saturated( this )
+    implicit none
+    class(rh_to_mr_test_type), intent(inout) :: this
+
+    real(r_def) :: mr_v
+    real(r_def) :: rel_hum
+    real(r_def) :: mr_sat_expected
+
+    rel_hum = 1.0_r_def
+    mr_v    = 0.0_r_def
+
+    ! At RH=1 the denominator (1 + 0 * mr_sat * recip_eps) = 1, so mr_v = mr_sat.
+    mr_sat_expected = qsaturation(theta_val * exner_val, p_mbar)
+
+    call rh_to_mr_code( mr_v, rel_hum, theta_val, exner_val, &
+                        p_zero_val, kappa_val, recip_eps_val )
+
+    @assertEqual( mr_sat_expected, mr_v, tol, &
+                  'RH=1 should give mr_v = q_sat' )
+  end subroutine test_saturated
+
+  !> @brief RH = 0.5: mixing ratio must match the analytical inversion formula.
+  !>
+  !> @details The inversion formula (see rh_to_mr_kernel_mod) gives:
+  !>
+  !>   mr_v = 0.5 * q_sat / (1 + 0.5 * q_sat * recip_epsilon)
+  @Test
+  subroutine test_half_rh( this )
+    implicit none
+    class(rh_to_mr_test_type), intent(inout) :: this
+
+    real(r_def) :: mr_v
+    real(r_def) :: rel_hum
+    real(r_def) :: mr_sat
+    real(r_def) :: mr_v_expected
+
+    rel_hum = 0.5_r_def
+    mr_v    = 0.0_r_def
+
+    mr_sat = qsaturation(theta_val * exner_val, p_mbar)
+
+    ! Expected: rel_hum * mr_sat / (1 + (1 - rel_hum) * mr_sat * recip_epsilon)
+    mr_v_expected = rel_hum * mr_sat / &
+                    ( 1.0_r_def + (1.0_r_def - rel_hum) * mr_sat * recip_eps_val )
+
+    call rh_to_mr_code( mr_v, rel_hum, theta_val, exner_val, &
+                        p_zero_val, kappa_val, recip_eps_val )
+
+    @assertEqual( mr_v_expected, mr_v, tol, &
+                  'RH=0.5 should satisfy the inversion formula' )
+  end subroutine test_half_rh
+
+end module rh_to_mr_kernel_mod_test
